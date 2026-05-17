@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data artifacts
+data/processed/*
+!data/processed/.gitkeep
+
+# Model artifacts
+models/*.joblib
+models/*.pkl
+models/*.keras
+models/*.h5
+models/saved_model/
+!models/.gitkeep
+
+# Logs
+logs/
+*.log
+
+# Notebook checkpoints
+.ipynb_checkpoints/
