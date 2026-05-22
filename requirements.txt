@@ -1,14 +1,31 @@
+# ==========================================
+# YOURI AI SERVICE - DEPENDENCIES
+# Target Environment: Python 3.11
+# ==========================================
+
+# --- 1. CORE WEB FRAMEWORK (Sesuai Syarat Capstone) ---
 fastapi==0.111.0
-uvicorn==0.30.1
+uvicorn[standard]>=0.29.0
+python-dotenv>=1.0.1
+pydantic>=2.7.0
+
+# --- 2. MACHINE LEARNING & NLP (Syarat Capstone) ---
 scikit-learn==1.4.2
-tensorflow==2.15.0
-pandas==2.2.2
-numpy==1.26.4
-pydantic==2.7.1
-google-genai==0.3.0
-tensorboard==2.15.1
-pydantic-settings==2.3.4
-python-dotenv==1.0.1
-joblib==1.4.2
-pytest==8.2.2
-httpx==0.27.0
+joblib>=1.4.0
+scipy>=1.13.0
+
+# --- 3. DEEP LEARNING (Syarat Capstone) ---
+tensorflow==2.15
+
+# [CRITICAL FIX]: TensorFlow 2.15.0 akan CRASH jika menggunakan numpy versi 2.0 ke atas. 
+# Kita kunci ketat di versi 1.26.4 untuk kestabilan sistem.
+numpy==1.26.4 
+
+# --- 4. DATA WRANGLING & EDA (Exploratory Data Analysis) ---
+pandas>=2.2.0
+matplotlib>=3.8.4
+seaborn>=0.13.2
+
+# --- 5. THIRD-PARTY API INTEGRATION (Fitur Sekunder) ---
+# Persiapan untuk menyusun "dialog" AI di endpoint substitution
+google-generativeai>=0.5.0
