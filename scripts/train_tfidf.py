@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -27,6 +28,7 @@ EDA_PLOT_PATH = BASE_DIR / "logs" / "eda_top_ingredients.png"
 LOGGER = logging.getLogger(__name__)
 SPACE_RE = re.compile(r"\s+")
 PUNCT_RE = re.compile(r"[^\w\s-]", flags=re.UNICODE)
+RecipeMetadata = dict[str, object]
 
 
 def normalize_ingredient(value: object) -> str:
@@ -55,23 +57,38 @@ def recipe_id_from_url(url: str, index: int) -> str:
     return slug or f"recipe-{index:05d}"
 
 
-def load_and_extract_data(filepath: Path) -> tuple[list[dict], list[str], list[str]]:
+def load_and_extract_data(filepath: Path) -> tuple[list[RecipeMetadata], list[str], list[str]]:
     LOGGER.info("Memuat dataset dari %s", filepath)
+
+    if not filepath.exists():
+        raise FileNotFoundError(f"Dataset tidak ditemukan: {filepath}")
 
     with filepath.open("r", encoding="utf-8") as file:
         dataset = json.load(file)
+
+    if not isinstance(dataset, dict):
+        raise ValueError("Dataset JSON harus berupa object.")
 
     recipes = dataset.get("data")
     if not isinstance(recipes, list):
         raise ValueError("Dataset JSON harus memiliki key 'data' berisi list resep.")
 
-    metadata: list[dict] = []
+    metadata: list[RecipeMetadata] = []
     corpus: list[str] = []
     ingredient_occurrences: list[str] = []
+    seen_recipe_ids: set[str] = set()
     skipped = 0
 
     for index, recipe in enumerate(recipes, start=1):
+        if not isinstance(recipe, dict):
+            skipped += 1
+            continue
+
         mapped_ingredients = recipe.get("mapped_ingredients") or []
+        if not isinstance(mapped_ingredients, list):
+            skipped += 1
+            continue
+
         ingredients = unique_preserve_order(
             [
                 normalize_ingredient(item.get("cleaned_entity"))
@@ -85,12 +102,18 @@ def load_and_extract_data(filepath: Path) -> tuple[list[dict], list[str], list[s
             continue
 
         url = str(recipe.get("URL") or "").strip()
+        recipe_id = recipe_id_from_url(url, index)
+        if recipe_id in seen_recipe_ids:
+            recipe_id = f"{recipe_id}-{index:05d}"
+        seen_recipe_ids.add(recipe_id)
+
         tokens = [ingredient_to_token(ingredient) for ingredient in ingredients]
+        title = str(recipe.get("Title") or f"Recipe {index}").strip() or f"Recipe {index}"
 
         metadata.append(
             {
-                "id": recipe_id_from_url(url, index),
-                "title": str(recipe.get("Title") or f"Recipe {index}").strip(),
+                "id": recipe_id,
+                "title": title,
                 "url": url,
                 "ingredients": ingredients,
                 "ingredient_tokens": tokens,
@@ -151,7 +174,7 @@ def build_vectorizer(min_df: int, max_df: float, max_features: int | None) -> Tf
 
 def train_and_export_tfidf(
     corpus: list[str],
-    metadata: list[dict],
+    metadata: list[RecipeMetadata],
     weights_dir: Path,
     min_df: int,
     max_df: float,
@@ -174,6 +197,8 @@ def train_and_export_tfidf(
         "max_df": max_df,
         "max_features": max_features,
         "artifact_version": 2,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "n_unique_ingredients": len(vectorizer.vocabulary_),
     }
 
     weights_dir.mkdir(parents=True, exist_ok=True)
@@ -197,9 +222,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def validate_args(args: argparse.Namespace) -> None:
+    if args.min_df < 1:
+        raise ValueError("--min-df harus >= 1.")
+
+    if not 0 < args.max_df <= 1:
+        raise ValueError("--max-df harus di antara 0 dan 1.")
+
+    if args.max_features is not None and args.max_features < 1:
+        raise ValueError("--max-features harus >= 1 jika diisi.")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     args = parse_args()
+    validate_args(args)
 
     metadata, corpus, ingredients = load_and_extract_data(args.data_path)
 

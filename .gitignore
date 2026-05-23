@@ -24,7 +24,6 @@ env/
 Thumbs.db
 
 # Data artifacts
-data/
 data/processed/*
 !data/processed/.gitkeep
 
