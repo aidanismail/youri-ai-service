@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
 import logging
-import re
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -11,470 +8,553 @@ import joblib
 import numpy as np
 from scipy import sparse
 from sklearn.metrics.pairwise import cosine_similarity, linear_kernel
+from ml_engine.ingredient_normalization import (
+    canonical_ingredient,
+    ingredient_to_token,
+    ingredient_variants,
+    normalize_ingredient,
+    substitution_group,
+)
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEIGHTS_DIR = BASE_DIR / "ml_engine" / "weights"
-DATA_PATH = BASE_DIR / "data" / "final_recipes_mongodb_v_final.json"
-FLAVOR_VECTOR_PATH = WEIGHTS_DIR / "flavor_vectors.pkl"
 
 LOGGER = logging.getLogger(__name__)
-SPACE_RE = re.compile(r"\s+")
-PUNCT_RE = re.compile(r"[^\w\s-]", flags=re.UNICODE)
 UNKNOWN_GROUP = "Unknown"
-DEFAULT_FLAVOR_VECTORS = {
-    5759: np.array([0.8, 0.2, 0.1, 0.0, 0.5], dtype=np.float32),
-    481: np.array([0.2, 0.8, 0.6, 0.1, 0.0], dtype=np.float32),
-    2836: np.array([0.0, 0.1, 0.9, 0.1, 0.0], dtype=np.float32),
-    6545: np.array([0.1, 0.6, 0.7, 0.0, 0.2], dtype=np.float32),
+UNKNOWN_SUBSTITUTION_GROUP = "unknown"
+
+SUBSTITUTION_COMPATIBILITY = {
+    "allium": {"allium"},
+    "aromatic_spice": {"aromatic_spice", "hot_spice"},
+    "hot_spice": {"hot_spice", "aromatic_spice"},
+    "aromatic_leaf": {"aromatic_leaf", "fresh_herb"},
+    "fresh_herb": {"fresh_herb", "aromatic_leaf", "allium"},
+    "egg": {"egg"},
+    "meat": {"meat"},
+    "offal": {"offal", "meat"},
+    "processed_meat": {"processed_meat", "meat"},
+    "seafood": {"seafood"},
+    "plant_protein": {"plant_protein"},
+    "legume": {"legume", "plant_protein"},
+    "creamy_fat": {"creamy_fat", "cooking_fat"},
+    "cooking_fat": {"cooking_fat", "creamy_fat"},
+    "carb": {"carb"},
+    "flour_starch": {"flour_starch", "carb"},
+    "starchy_vegetable": {"starchy_vegetable", "vegetable", "carb"},
+    "vegetable": {"vegetable", "starchy_vegetable", "strong_vegetable"},
+    "strong_vegetable": {"strong_vegetable", "vegetable"},
+    "mushroom": {"mushroom", "vegetable"},
+    "acid": {"acid"},
+    "fruit": {"fruit", "acid"},
+    "condiment_sauce": {"condiment_sauce", "fermented_condiment"},
+    "fermented_condiment": {"fermented_condiment", "condiment_sauce"},
+    "basic_seasoning": {"basic_seasoning", "condiment_sauce"},
+    "basic_liquid": {"basic_liquid"},
+    "leavening": {"leavening"},
+    "beverage": {"beverage", "basic_liquid"},
+    "wrapper_leaf": {"wrapper_leaf"},
+    "crunchy_topping": {"crunchy_topping"},
+}
+MIN_SUBSTITUTION_SCORE = 0.60
+MIN_SUBSTITUTION_FLAVOR_SCORE = 0.35
+FALLBACK_FOOD_GROUP_BLOCKLIST = {"Vegetables", "Other Ingredients"}
+
+COMMON_INGREDIENTS = {
+    # basic liquid
+    "air",
+    "beri air",
+    "air matang",
+    "air putih",
+    "air secukup nya",
+    "air es",
+    "air hangat",
+    "air merebus daging",
+    "sesuai selera air secukupny",
+
+    # garam / gula / campuran seasoning dasar
+    "garam",
+    "gula",
+    "gula pasir",
+    "gula merah",
+    "gula merah sisir",
+    "gula jawa",
+    "gula putih",
+    "blok gula jawa",
+    "st gula putih",
+    "secukupny gula merah",
+    "sejimpit gula",
+    "gulput",
+
+    "garam gula",
+    "gula garam",
+    "garam gula merica bubuk",
+    "gula garam lada",
+    "gula garam penyedap rasa",
+    "gula garam penyedap",
+    "gula garam minyak",
+    "garam gula penyedap",
+    "garam gula secukup nya",
+    "garam gula air",
+    "garam gula merah air",
+    "garam gula kaldu bubuk",
+    "optional garam gula",
+    "sesuai selera gulagaram merica",
+
+    "lada garam",
+    "garam lada",
+    "garam merica bubuk",
+    "merica garam",
+    "garam royco",
+    "royco garam air",
+    "garam kaldu sapi bubuk",
+    "garampenyedap rasa",
+    "garam penyedap",
+    "garam micin",
+    "sdikit garam micin",
+    "kecap garam",
+    "sesuai selera garam",
+    "st garam",
+    "sejumput garam",
+    "garam bila perlu",
+
+    # minyak / lemak umum
+    "minyak",
+    "minyak goreng",
+    "minyak menggoreng",
+    "minyak menumis",
+    "minyak goreng menumis",
+    "minyak menumis bumbu",
+    "minyak sayur",
+    "olive oil",
+    "minyak samin",
+    "minyak wijen",
+    "margarin",
+    "mentega",
+    "mentega blueband",
+    "mentega butter",
+    "mentega tawar",
+    "munjung mentega",
+
+    # lada / merica
+    "lada",
+    "lada bubuk",
+    "lada hitam",
+    "lada hitam kasar",
+    "lada butiran",
+    "lada putih",
+    "lada putih bubuk",
+    "ladaku",
+
+    "merica",
+    "merica bubuk",
+    "merica hitam gerus",
+    "merica butiran",
+    "bubuk merica",
+    "black pepper",
+    "mrica",
+    "sd teh mrica",
+    "bumbu lada hitam",
+    "saori saus lada hitam",
+
+    # penyedap / kaldu / brand seasoning
+    "penyedap rasa",
+    "penyedap",
+    "bumbu penyedap",
+    "penyedap rasa ayam",
+    "penyedap rasa sapi",
+    "jika suka penyedap royco",
+
+    "kaldu bubuk",
+    "bubuk kaldu sapi",
+    "kaldu jamur",
+    "kaldu ayam bubuk",
+    "kaldu jamur bubuk",
+    "kaldu bubuk instan",
+    "kaldu sapi bubuk",
+    "kaldu sapi",
+    "kaldu ayam",
+    "kaldu sapi rebusan",
+    "air kaldu ayam",
+    "kaldu sapi saya royco",
+
+    "royco",
+    "royco ayam",
+    "royco kaldu sapi ayam",
+    "masako",
+    "masako ayam",
+    "magic lezat",
+    "sasa",
+    "blok knorr",
+    "sejimpit vetsin",
+
+    # generic / noise ingredient label
+    "bumbu",
+    "bumbu bubuk",
+    "bumbu alusin",
+    "bumbu kasar",
+    "bumbu tumis",
+    "bumbu celupan",
+    "bumbu pelengkap",
+    "bumbu marinade",
+    "bumbu marinase",
+    "bumbu kuah",
+    "bumbu kuah tongseng",
+
+    "bahan",
+    "bahan pelengkap",
+    "bahan utama",
+    "pelengkap",
+    "di haluskan",
+    "tambahan",
+    "lainnya",
+    "satu",
 }
 
+MIN_MEANINGFUL_USER_INGREDIENTS = 3
+MIN_MATCHED_MEANINGFUL_INGREDIENTS = 3
+MIN_MATCH_PERCENTAGE = 55
+MAX_RECIPE_INGREDIENTS_FOR_FULL_MATCH = 8
 
-def normalize_ingredient(value: object) -> str:
-    text = PUNCT_RE.sub(" ", str(value or "").casefold())
-    return SPACE_RE.sub(" ", text).strip(" -_")
+COMMON_INGREDIENTS = {canonical_ingredient(ingredient) for ingredient in COMMON_INGREDIENTS}
+
+TITLE_CORE_ALIASES = {
+    "ayam": "ayam",
+    "sapi": "daging sapi",
+    "kambing": "daging kambing",
+    "tongkol": "tongkol",
+    "tuna": "tuna",
+    "ikan": "ikan",
+    "udang": "udang",
+    "mie": "mie",
+    "telur": "telur",
+    "telor": "telur",
+    "tahu": "tahu",
+    "tempe": "tempe",
+}
+ANCHOR_INGREDIENTS = set(TITLE_CORE_ALIASES.values())
 
 
-def ingredient_to_token(ingredient: str) -> str:
-    return ingredient.replace(" ", "_")
+def infer_title_core_ingredients(title: object) -> set[str]:
+    normalized_title = normalize_ingredient(title)
+    return {
+        canonical
+        for keyword, canonical in TITLE_CORE_ALIASES.items()
+        if keyword in normalized_title
+    }
+
+
+def title_conflicts_with_user_ingredients(title: object, user_ingredients: set[str]) -> bool:
+    normalized_title = normalize_ingredient(title)
+    no_santan_title = (
+        "no santen" in normalized_title
+        or "no santan" in normalized_title
+        or "tanpa santan" in normalized_title
+        or "tanpa santen" in normalized_title
+    )
+    return no_santan_title and "santan" in user_ingredients
 
 
 class LexicalMatcherModel:
-    def __init__(
-        self,
-        weights_dir: str | Path = WEIGHTS_DIR,
-        cosine_weight: float = 0.70,
-        user_coverage_weight: float = 0.20,
-        recipe_coverage_weight: float = 0.10,
-        min_score: float = 0.01,
-    ) -> None:
+    def __init__(self, weights_dir: str | Path = WEIGHTS_DIR):
         self.weights_dir = Path(weights_dir)
-        self.cosine_weight = cosine_weight
-        self.user_coverage_weight = user_coverage_weight
-        self.recipe_coverage_weight = recipe_coverage_weight
-        self.min_score = min_score
-
         self.vectorizer: Any | None = None
         self.recipe_matrix: sparse.csr_matrix | None = None
         self.recipe_metadata: list[dict[str, Any]] = []
-        self.recipe_ingredient_sets: list[frozenset[str]] = []
-        self.recipe_ingredient_counts = np.array([], dtype=np.float32)
-        self.ingredient_index: dict[str, np.ndarray] = {}
         self.load_error: str | None = None
-
         self._load_artifacts()
 
     @property
     def is_ready(self) -> bool:
-        return self.vectorizer is not None and self.recipe_matrix is not None
+        return (
+            self.vectorizer is not None
+            and self.recipe_matrix is not None
+            and bool(self.recipe_metadata)
+            and hasattr(self, "known_ingredients")
+            and hasattr(self, "known_canonical_ingredients")
+        )
 
     def _load_artifacts(self) -> None:
-        paths = {
-            "vectorizer": self.weights_dir / "tfidf_vectorizer.pkl",
-            "matrix": self.weights_dir / "recipe_matrix.pkl",
-            "metadata": self.weights_dir / "recipe_metadata.pkl",
-        }
-        missing = [path.name for path in paths.values() if not path.exists()]
-
-        if missing:
-            self.load_error = f"Artifacts belum tersedia: {', '.join(missing)}"
-            LOGGER.error("%s. Jalankan scripts/train_tfidf.py.", self.load_error)
-            return
-
         try:
-            vectorizer = joblib.load(paths["vectorizer"])
-            recipe_matrix = joblib.load(paths["matrix"])
-            recipe_metadata = joblib.load(paths["metadata"])
+            self.vectorizer = joblib.load(self.weights_dir / "tfidf_vectorizer.pkl")
+            self.recipe_matrix = joblib.load(self.weights_dir / "recipe_matrix.pkl")
+            self.recipe_metadata = joblib.load(self.weights_dir / "recipe_metadata.pkl")
+            self.ingredient_master = joblib.load(self.weights_dir / "ingredient_master.pkl")
+            self.known_ingredients = set(self.ingredient_master.keys())
+            self.known_canonical_ingredients = {
+                canonical_ingredient(ingredient)
+                for ingredient in self.known_ingredients
+                if canonical_ingredient(ingredient)
+            }
+            LOGGER.info("TF-IDF matcher siap: %s resep", self.recipe_matrix.shape[0])
         except Exception as exc:
             self.load_error = f"Gagal memuat artifacts: {exc}"
             LOGGER.exception(self.load_error)
-            return
 
-        if not hasattr(vectorizer, "transform"):
-            self.load_error = "Artifact vectorizer tidak memiliki method transform."
-            LOGGER.error(self.load_error)
-            return
-
-        if not sparse.issparse(recipe_matrix):
-            recipe_matrix = sparse.csr_matrix(recipe_matrix, dtype=np.float32)
-        else:
-            recipe_matrix = recipe_matrix.tocsr().astype(np.float32)
-
-        recipe_matrix.sort_indices()
-
-        if not isinstance(recipe_metadata, list):
-            self.load_error = "Artifact metadata harus berupa list."
-            LOGGER.error(self.load_error)
-            return
-
-        if len(recipe_metadata) != recipe_matrix.shape[0]:
-            self.load_error = "Jumlah metadata tidak sama dengan jumlah baris matrix."
-            LOGGER.error(self.load_error)
-            return
-
-        if recipe_matrix.shape[0] == 0 or recipe_matrix.shape[1] == 0:
-            self.load_error = "Matrix TF-IDF kosong."
-            LOGGER.error(self.load_error)
-            return
-
-        self.vectorizer = vectorizer
-        self.recipe_matrix = recipe_matrix
-        self.recipe_metadata = recipe_metadata
-        self._build_ingredient_index()
-
-        LOGGER.info(
-            "TF-IDF matcher siap: %s resep, %s fitur",
-            recipe_matrix.shape[0],
-            recipe_matrix.shape[1],
-        )
-
-    def _build_ingredient_index(self) -> None:
-        ingredient_to_indices: dict[str, list[int]] = defaultdict(list)
-        ingredient_sets: list[frozenset[str]] = []
-
-        for index, metadata in enumerate(self.recipe_metadata):
-            raw_ingredients = metadata.get("ingredients") or []
-            normalized_ingredients = {
-                ingredient
-                for ingredient in (normalize_ingredient(value) for value in raw_ingredients)
-                if ingredient
-            }
-
-            ingredient_sets.append(frozenset(normalized_ingredients))
-            for ingredient in normalized_ingredients:
-                ingredient_to_indices[ingredient].append(index)
-
-        self.recipe_ingredient_sets = ingredient_sets
-        self.recipe_ingredient_counts = np.array(
-            [max(len(ingredients), 1) for ingredients in ingredient_sets],
-            dtype=np.float32,
-        )
-        self.ingredient_index = {
-            ingredient: np.asarray(indices, dtype=np.int32)
-            for ingredient, indices in ingredient_to_indices.items()
-        }
-
-    @staticmethod
-    def _extract_valid_ingredients(user_ingredients: list[Any]) -> list[str]:
-        valid_ingredients: list[str] = []
-        seen: set[str] = set()
-
-        for item in user_ingredients or []:
-            raw_value: Any
-            if isinstance(item, dict):
-                if not item.get("is_valid", True):
-                    continue
-                raw_value = item.get("name") or item.get("cleaned_entity") or item.get("ingredient")
-            else:
-                raw_value = item
-
-            ingredient = normalize_ingredient(raw_value)
-            if ingredient and ingredient not in seen:
-                seen.add(ingredient)
-                valid_ingredients.append(ingredient)
-
-        return valid_ingredients
-
-    def _metadata_overlap_counts(self, ingredients: list[str]) -> np.ndarray:
-        counts = np.zeros(len(self.recipe_metadata), dtype=np.float32)
-
-        for ingredient in ingredients:
-            indices = self.ingredient_index.get(ingredient)
-            if indices is not None:
-                counts[indices] += 1.0
-
-        return counts
-
-    def predict_match(
-        self,
-        user_ingredients: list[Any],
-        top_k: int = 10,
-        include_details: bool = False,
-    ) -> list[dict[str, Any]]:
+    def predict_match(self, user_ingredients: list[Any], top_k: int = 10, include_details: bool = False) -> list[dict[str, Any]]:
         if not self.is_ready:
-            return [{"error": self.load_error or "Model belum siap di-load."}]
-
-        ingredients = self._extract_valid_ingredients(user_ingredients)
-        if not ingredients:
             return []
 
-        assert self.vectorizer is not None
-        assert self.recipe_matrix is not None
+        valid_ingredients = []
+        query_terms = []
+        for item in user_ingredients:
+            if not item.get("is_valid"):
+                continue
 
-        top_k = max(1, min(int(top_k), len(self.recipe_metadata)))
-        query = " ".join(ingredient_to_token(ingredient) for ingredient in ingredients)
+            norm_name = normalize_ingredient(item.get("name"))
+            if not norm_name:
+                continue
+
+            canonical_name = canonical_ingredient(norm_name)
+            if (
+                norm_name not in self.known_ingredients
+                and canonical_name not in self.known_canonical_ingredients
+            ):
+                continue
+
+            valid_ingredients.append(canonical_name)
+            query_terms.extend(ingredient_variants(norm_name))
+        valid_ingredients = list(dict.fromkeys(valid_ingredients))
+        query_terms = list(dict.fromkeys(query_terms))
+
+        if not valid_ingredients:
+            return []
+
+        meaningful_user_ingredients = {
+            ing for ing in valid_ingredients
+            if ing not in COMMON_INGREDIENTS
+        }
+
+        if len(meaningful_user_ingredients) < MIN_MEANINGFUL_USER_INGREDIENTS:
+            return []
+        requested_anchor_ingredients = meaningful_user_ingredients & ANCHOR_INGREDIENTS
+
+        query = " ".join(ingredient_to_token(ing) for ing in query_terms)
         user_vector = self.vectorizer.transform([query])
 
-        cosine_scores = linear_kernel(user_vector, self.recipe_matrix).ravel().astype(np.float32)
-        overlap_counts = self._metadata_overlap_counts(ingredients)
-        user_coverage = overlap_counts / max(len(ingredients), 1)
-        recipe_coverage = overlap_counts / self.recipe_ingredient_counts
-
-        scores = (
-            self.cosine_weight * cosine_scores
-            + self.user_coverage_weight * user_coverage
-            + self.recipe_coverage_weight * recipe_coverage
-        )
-
-        candidate_indices = np.flatnonzero(scores > self.min_score)
+        scores = linear_kernel(user_vector, self.recipe_matrix).ravel().astype(np.float32)
+        
+        # Ambil indeks yang punya skor > 0
+        candidate_indices = np.flatnonzero(scores > 0.01)
         if candidate_indices.size == 0:
             return []
 
-        if candidate_indices.size > top_k:
-            top_positions = np.argpartition(scores[candidate_indices], -top_k)[-top_k:]
+        candidate_pool_size = max(top_k * 8, 80)
+
+        if candidate_indices.size > candidate_pool_size:
+            top_positions = np.argpartition(
+                scores[candidate_indices],
+                -candidate_pool_size,
+            )[-candidate_pool_size:]
             candidate_indices = candidate_indices[top_positions]
 
         candidate_indices = sorted(
             candidate_indices,
-            key=lambda idx: (scores[idx], cosine_scores[idx], user_coverage[idx]),
+            key=lambda idx: scores[idx],
             reverse=True,
-        )[:top_k]
+        )
 
-        results: list[dict[str, Any]] = []
+        results = []
         for index in candidate_indices:
             metadata = self.recipe_metadata[int(index)]
-            result = {
-                "recipe_id": str(metadata.get("id", f"recipe-{int(index):05d}")),
-                "title": str(metadata.get("title", "")),
-                "match_percentage": int(round(min(float(scores[index]), 1.0) * 100)),
+            if title_conflicts_with_user_ingredients(
+                metadata.get("title", ""),
+                meaningful_user_ingredients,
+            ):
+                continue
+
+            ingredient_source = metadata.get("canonical_ingredients") or metadata.get("ingredients", [])
+            recipe_ingredients = {
+                canonical_ingredient(ing)
+                for ing in ingredient_source
             }
 
-            if include_details:
-                recipe_ingredients = self.recipe_ingredient_sets[int(index)]
-                matched = [ingredient for ingredient in ingredients if ingredient in recipe_ingredients]
-                result.update(
-                    {
-                        "url": metadata.get("url", ""),
-                        "matched_ingredients": matched,
-                        "missing_input_ingredients": [
-                            ingredient for ingredient in ingredients if ingredient not in recipe_ingredients
-                        ],
-                        "similarity_score": round(float(cosine_scores[index]), 4),
-                    }
+            meaningful_recipe_ingredients = {
+                ing for ing in recipe_ingredients
+                if ing not in COMMON_INGREDIENTS
+            }
+
+            if not meaningful_recipe_ingredients:
+                continue
+
+            matched_ingredients = meaningful_user_ingredients & meaningful_recipe_ingredients
+
+            core_ingredients = {
+                canonical_ingredient(ing)
+                for ing in (
+                    metadata.get("core_canonical_ingredients")
+                    or metadata.get("core_ingredients", [])
                 )
+            }
 
-            results.append(result)
-
-        return results
-
-
-class SmartSubstitutionEngine:
-    def __init__(
-        self,
-        data_path: str | Path = DATA_PATH,
-        flavor_vectors_path: str | Path = FLAVOR_VECTOR_PATH,
-        enforce_food_group: bool = True,
-    ) -> None:
-        self.data_path = Path(data_path)
-        self.flavor_vectors_path = Path(flavor_vectors_path)
-        self.enforce_food_group = enforce_food_group
-        self.ingredient_kb: dict[str, dict[str, Any]] = {}
-        self.flavor_vectors: dict[int, np.ndarray] = {}
-        self.vector_dim = 5
-        self.load_error: str | None = None
-
-        self._build_knowledge_base()
-        self._load_flavor_vectors()
-
-    @property
-    def is_ready(self) -> bool:
-        return bool(self.ingredient_kb) and self.load_error is None
-
-    def _build_knowledge_base(self) -> None:
-        if not self.data_path.exists():
-            self.load_error = f"Dataset tidak ditemukan: {self.data_path}"
-            LOGGER.error(self.load_error)
-            return
-
-        try:
-            with self.data_path.open("r", encoding="utf-8") as file:
-                dataset = json.load(file)
-        except json.JSONDecodeError as exc:
-            self.load_error = f"Gagal parsing JSON dataset: {exc}"
-            LOGGER.error(self.load_error)
-            return
-        except OSError as exc:
-            self.load_error = f"Gagal membaca dataset: {exc}"
-            LOGGER.error(self.load_error)
-            return
-
-        recipes = dataset.get("data") if isinstance(dataset, dict) else None
-        if not isinstance(recipes, list):
-            self.load_error = "Dataset harus memiliki key 'data' berisi list resep."
-            LOGGER.error(self.load_error)
-            return
-
-        for recipe in recipes:
-            if not isinstance(recipe, dict):
+            meaningful_core_ingredients = {
+                ing for ing in core_ingredients
+                if ing not in COMMON_INGREDIENTS
+            }
+            title_core_ingredients = infer_title_core_ingredients(metadata.get("title", ""))
+            if title_core_ingredients and not (meaningful_user_ingredients & title_core_ingredients):
                 continue
 
-            mapped_ingredients = recipe.get("mapped_ingredients") or []
-            if not isinstance(mapped_ingredients, list):
+            meaningful_core_ingredients |= {
+                ing for ing in title_core_ingredients
+                if ing not in COMMON_INGREDIENTS
+            }
+
+            core_matched = bool(meaningful_user_ingredients & meaningful_core_ingredients)
+            if meaningful_core_ingredients and not core_matched:
                 continue
-
-            for ingredient in mapped_ingredients:
-                if not isinstance(ingredient, dict):
-                    continue
-
-                normalized_name = normalize_ingredient(ingredient.get("cleaned_entity"))
-                if not normalized_name:
-                    continue
-
-                food_group = str(ingredient.get("food_group") or UNKNOWN_GROUP).strip() or UNKNOWN_GROUP
-                flavordb_id = self._extract_flavordb_id(ingredient)
-                existing = self.ingredient_kb.get(normalized_name)
-
-                if existing is None:
-                    self.ingredient_kb[normalized_name] = {
-                        "food_group": food_group,
-                        "flavordb_id": flavordb_id,
-                    }
-                    continue
-
-                if existing["food_group"] == UNKNOWN_GROUP and food_group != UNKNOWN_GROUP:
-                    existing["food_group"] = food_group
-
-                if existing["flavordb_id"] is None and flavordb_id is not None:
-                    existing["flavordb_id"] = flavordb_id
-
-        if not self.ingredient_kb:
-            self.load_error = "Knowledge base ingredient kosong."
-            LOGGER.error(self.load_error)
-            return
-
-        LOGGER.info("Knowledge base substitution siap: %s bahan unik.", len(self.ingredient_kb))
-
-    @staticmethod
-    def _extract_flavordb_id(ingredient: dict[str, Any]) -> int | None:
-        flavor_mapping = ingredient.get("flavordb_mapping")
-        if not isinstance(flavor_mapping, dict):
-            return None
-
-        raw_id = flavor_mapping.get("flavordb_id")
-        if raw_id is None:
-            return None
-
-        try:
-            return int(raw_id)
-        except (TypeError, ValueError):
-            return None
-
-    def _load_flavor_vectors(self) -> None:
-        vectors: dict[int, np.ndarray] | None = None
-
-        if self.flavor_vectors_path.exists():
-            try:
-                vectors = self._coerce_flavor_vectors(joblib.load(self.flavor_vectors_path))
-            except Exception as exc:
-                LOGGER.warning("Gagal memuat flavor vectors, memakai fallback: %s", exc)
-
-        if not vectors:
-            vectors = {key: value.copy() for key, value in DEFAULT_FLAVOR_VECTORS.items()}
-
-        self.flavor_vectors = vectors
-        self.vector_dim = len(next(iter(vectors.values()))) if vectors else self.vector_dim
-
-    @staticmethod
-    def _coerce_flavor_vectors(raw_vectors: Any) -> dict[int, np.ndarray]:
-        if not isinstance(raw_vectors, dict):
-            return {}
-
-        vectors: dict[int, np.ndarray] = {}
-        expected_dim: int | None = None
-
-        for raw_key, raw_value in raw_vectors.items():
-            try:
-                key = int(raw_key)
-                vector = np.asarray(raw_value, dtype=np.float32).reshape(-1)
-            except (TypeError, ValueError):
-                continue
-
-            if vector.size == 0:
-                continue
-
-            expected_dim = expected_dim or int(vector.size)
-            if vector.size != expected_dim:
-                LOGGER.warning("Flavor vector %s dilewati karena dimensi tidak konsisten.", key)
-                continue
-
-            vectors[key] = vector
-
-        return vectors
-
-    def _get_flavor_vector(self, flavordb_id: int | None) -> np.ndarray:
-        if flavordb_id is None:
-            return np.zeros((1, self.vector_dim), dtype=np.float32)
-
-        vector = self.flavor_vectors.get(flavordb_id)
-        if vector is None:
-            return np.zeros((1, self.vector_dim), dtype=np.float32)
-
-        return np.asarray(vector, dtype=np.float32).reshape(1, -1)
-
-    def find_best_substitutes(
-        self,
-        missing_ingredient: str,
-        surplus_ingredients: list[str],
-        top_k: int = 5,
-    ) -> list[dict[str, Any]]:
-        if not self.is_ready:
-            LOGGER.warning("Substitution engine belum siap: %s", self.load_error)
-            return []
-
-        norm_missing = normalize_ingredient(missing_ingredient)
-        missing_data = self.ingredient_kb.get(norm_missing)
-
-        if not missing_data:
-            LOGGER.info("Bahan hilang '%s' tidak ditemukan di knowledge base.", norm_missing)
-            return []
-
-        missing_group = missing_data["food_group"]
-        missing_vector = self._get_flavor_vector(missing_data["flavordb_id"])
-        candidates: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        for surplus in surplus_ingredients:
-            norm_surplus = normalize_ingredient(surplus)
-            if not norm_surplus or norm_surplus == norm_missing or norm_surplus in seen:
-                continue
-
-            seen.add(norm_surplus)
-            surplus_data = self.ingredient_kb.get(norm_surplus)
-            if not surplus_data:
-                continue
-
-            surplus_group = surplus_data["food_group"]
-            same_known_group = (
-                missing_group != UNKNOWN_GROUP
-                and surplus_group != UNKNOWN_GROUP
-                and missing_group == surplus_group
+            
+            min_matched = min(
+                MIN_MATCHED_MEANINGFUL_INGREDIENTS,
+                len(meaningful_user_ingredients),
             )
+            if not meaningful_core_ingredients:
+                min_matched = max(min_matched, min(5, len(meaningful_user_ingredients)))
 
-            if self.enforce_food_group and missing_group != UNKNOWN_GROUP and surplus_group != UNKNOWN_GROUP:
-                if not same_known_group:
+            if len(matched_ingredients) < min_matched:
+                continue
+
+            recipe_anchor_ingredients = (
+                meaningful_recipe_ingredients & ANCHOR_INGREDIENTS
+            ) | meaningful_core_ingredients
+            anchor_match_ratio = 1.0
+            if requested_anchor_ingredients:
+                anchor_match_ratio = len(
+                    requested_anchor_ingredients & recipe_anchor_ingredients
+                ) / len(requested_anchor_ingredients)
+                if anchor_match_ratio <= 0:
                     continue
-
-            surplus_vector = self._get_flavor_vector(surplus_data["flavordb_id"])
-            flavor_score = 0.0
-            if np.any(missing_vector) and np.any(surplus_vector):
-                flavor_score = float(cosine_similarity(missing_vector, surplus_vector)[0][0])
-
-            candidates.append(
-                {
-                    "substitute_name": surplus,
-                    "normalized_name": norm_surplus,
-                    "food_group": surplus_group,
-                    "flavor_similarity_score": round(flavor_score, 4),
-                    "same_food_group": same_known_group,
-                }
+            
+            full_match_target = min(
+                len(meaningful_recipe_ingredients),
+                MAX_RECIPE_INGREDIENTS_FOR_FULL_MATCH,
             )
+            recipe_coverage = min(len(matched_ingredients) / full_match_target, 1.0)
+            user_precision = len(matched_ingredients) / len(meaningful_user_ingredients)
+            core_bonus = 0.05 if core_matched else 0.0
+            required_percentage = MIN_MATCH_PERCENTAGE if meaningful_core_ingredients else 65
 
-        candidates.sort(
+            score = min((recipe_coverage * 0.75) + (user_precision * 0.20) + core_bonus, 1.0)
+            score *= 0.55 + (0.45 * anchor_match_ratio)
+            match_percentage = int(round(score * 100))
+
+            if match_percentage < required_percentage:
+                continue
+            
+        
+
+            results.append({
+                "recipe_id": metadata["id"],
+                "title": metadata["title"],
+                "match_percentage": match_percentage,
+                "_matched_count": len(matched_ingredients),
+                "_tfidf_score": float(scores[index]),
+            })
+
+        results.sort(
             key=lambda item: (
-                item["same_food_group"],
-                item["flavor_similarity_score"],
-                item["substitute_name"],
+                item["match_percentage"],
+                item["_matched_count"],
+                item["_tfidf_score"],
             ),
             reverse=True,
         )
 
-        return candidates[: max(1, int(top_k))]
+        for item in results:
+            item.pop("_matched_count", None)
+            item.pop("_tfidf_score", None)
+
+        return results[:top_k]
+
+
+
+class SmartSubstitutionEngine:
+    def __init__(self, weights_dir: str | Path = WEIGHTS_DIR):
+        self.weights_dir = Path(weights_dir)
+        self.ingredient_kb: dict[str, dict[str, Any]] = {}
+        self.load_error: str | None = None
+        self._load_master_data()
+
+    @property
+    def is_ready(self) -> bool:
+        return bool(self.ingredient_kb)
+
+    def _load_master_data(self) -> None:
+        try:
+            # Load dari artifact yang dibuat oleh train_tfidf.py
+            self.ingredient_kb = joblib.load(self.weights_dir / "ingredient_master.pkl")
+            LOGGER.info("Knowledge base substitusi siap: %s bahan", len(self.ingredient_kb))
+        except Exception as exc:
+            self.load_error = f"Gagal memuat Master DB. Jalankan train_tfidf.py dulu: {exc}"
+            LOGGER.error(self.load_error)
+
+    def find_best_substitutes(self, missing_ingredient: str, surplus_ingredients: list[str], top_k: int = 5) -> list[dict[str, Any]]:
+        if not self.is_ready:
+            return []
+
+        norm_missing = normalize_ingredient(missing_ingredient)
+        canonical_missing = canonical_ingredient(norm_missing)
+        missing_data = self.ingredient_kb.get(norm_missing) or self.ingredient_kb.get(canonical_missing)
+
+        if not missing_data:
+            return [] # Jika bahan hilang tidak ada di DB, skip.
+
+        missing_group = missing_data["food_group"]
+        missing_vector = missing_data["flavor_vector"]
+        missing_substitution_group = substitution_group(norm_missing)
+        candidates = []
+
+        for surplus in surplus_ingredients:
+            norm_surplus = normalize_ingredient(surplus)
+            canonical_surplus = canonical_ingredient(norm_surplus)
+            surplus_data = self.ingredient_kb.get(norm_surplus) or self.ingredient_kb.get(canonical_surplus)
+            
+            if not surplus_data or canonical_surplus == canonical_missing:
+                continue
+
+            surplus_group = surplus_data["food_group"]
+            surplus_substitution_group = substitution_group(norm_surplus)
+
+            # LAYER 3: Cek Rasa
+            surplus_vector = surplus_data["flavor_vector"]
+            flavor_score = 0.0
+            if np.any(missing_vector) and np.any(surplus_vector):
+                flavor_score = float(cosine_similarity(missing_vector, surplus_vector)[0][0])
+
+            if missing_substitution_group != UNKNOWN_SUBSTITUTION_GROUP:
+                compatible_groups = SUBSTITUTION_COMPATIBILITY.get(
+                    missing_substitution_group,
+                    {missing_substitution_group},
+                )
+                if surplus_substitution_group not in compatible_groups:
+                    continue
+                functional_score = 1.0 if surplus_substitution_group == missing_substitution_group else 0.75
+            else:
+                if (
+                    missing_group == UNKNOWN_GROUP
+                    or surplus_group == UNKNOWN_GROUP
+                    or missing_group != surplus_group
+                    or missing_group in FALLBACK_FOOD_GROUP_BLOCKLIST
+                ):
+                    continue
+                functional_score = 0.65
+
+            substitution_score = (flavor_score * 0.65) + (functional_score * 0.35)
+            if (
+                substitution_score < MIN_SUBSTITUTION_SCORE
+                or flavor_score < MIN_SUBSTITUTION_FLAVOR_SCORE
+            ):
+                continue
+
+            candidates.append({
+                "substitute_name": surplus,
+                "food_group": surplus_group,
+                "substitution_group": surplus_substitution_group,
+                "flavor_similarity_score": round(flavor_score, 4),
+                "substitution_score": round(substitution_score, 4),
+            })
+
+        candidates.sort(
+            key=lambda x: (x["substitution_score"], x["flavor_similarity_score"]),
+            reverse=True,
+        )
+        return candidates[:top_k]

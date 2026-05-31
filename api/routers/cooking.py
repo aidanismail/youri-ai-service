@@ -55,7 +55,7 @@ def match_recipes(
 
     if not predictions:
         return MatchResponse(
-            message="Tidak ada resep yang cocok dengan bahan tersebut.",
+            message="Belum ada resep yang cukup cocok. Coba tambahkan bahan utama atau bumbu yang lebih spesifik.",
             data=[],
         )
 
@@ -137,7 +137,7 @@ def ai_substitution(
             data=SubstitutionData(
                 character=CharacterDialog(
                     status="fail",
-                    dialog="Aku belum menemukan bahan pengganti yang cocok dari bahan surplusmu.",
+                    dialog="Aku belum menemukan pengganti yang realistis dari bahan surplusmu.",
                 ),
                 substitutions_mapping=None,
             ),
@@ -151,7 +151,7 @@ def ai_substitution(
     dialog = f"Aku menemukan pengganti yang paling cocok: {mapping_text}."
 
     if unresolved:
-        dialog += f" Belum ada pengganti kuat untuk: {', '.join(unresolved)}."
+        dialog += f" Belum ada pengganti realistis untuk: {', '.join(unresolved)}."
 
     return SubstitutionResponse(
         message="AI substitution successful",
