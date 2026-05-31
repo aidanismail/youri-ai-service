@@ -1,257 +1,138 @@
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import re
-from collections import Counter
-from datetime import datetime, timezone
+import sys
 from pathlib import Path
-from urllib.parse import urlparse
 
 import joblib
-import matplotlib
 import numpy as np
-import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-matplotlib.use("Agg")
-
-import seaborn as sns
-from matplotlib import pyplot as plt
-
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_PATH = BASE_DIR / "data" / "final_recipes_mongodb_v_final.json"
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from ml_engine.ingredient_normalization import (
+    canonical_ingredient,
+    ingredient_to_token,
+    ingredient_variants,
+    normalize_ingredient,
+)
+
+DATA_PATH = BASE_DIR / "data" / "dataset_opsi_1_final_with_images.json"
 WEIGHTS_DIR = BASE_DIR / "ml_engine" / "weights"
-EDA_PLOT_PATH = BASE_DIR / "logs" / "eda_top_ingredients.png"
 
 LOGGER = logging.getLogger(__name__)
 SPACE_RE = re.compile(r"\s+")
 PUNCT_RE = re.compile(r"[^\w\s-]", flags=re.UNICODE)
-RecipeMetadata = dict[str, object]
 
 
-def normalize_ingredient(value: object) -> str:
-    text = PUNCT_RE.sub(" ", str(value or "").casefold())
-    return SPACE_RE.sub(" ", text).strip(" -_")
+def slugify(text: str) -> str:
+    """Mengubah judul menjadi URL slug (contoh: Pepes Tahu -> pepes-tahu)"""
+    text = PUNCT_RE.sub("", str(text).lower())
+    return SPACE_RE.sub("-", text.strip())
 
-
-def ingredient_to_token(ingredient: str) -> str:
-    return ingredient.replace(" ", "_")
-
-
-def unique_preserve_order(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    unique_values: list[str] = []
-
-    for value in values:
-        if value and value not in seen:
-            seen.add(value)
-            unique_values.append(value)
-
-    return unique_values
-
-
-def recipe_id_from_url(url: str, index: int) -> str:
-    slug = urlparse(url or "").path.rstrip("/").split("/")[-1]
-    return slug or f"recipe-{index:05d}"
-
-
-def load_and_extract_data(filepath: Path) -> tuple[list[RecipeMetadata], list[str], list[str]]:
-    LOGGER.info("Memuat dataset dari %s", filepath)
-
-    if not filepath.exists():
-        raise FileNotFoundError(f"Dataset tidak ditemukan: {filepath}")
-
-    with filepath.open("r", encoding="utf-8") as file:
-        dataset = json.load(file)
-
-    if not isinstance(dataset, dict):
-        raise ValueError("Dataset JSON harus berupa object.")
-
-    recipes = dataset.get("data")
-    if not isinstance(recipes, list):
-        raise ValueError("Dataset JSON harus memiliki key 'data' berisi list resep.")
-
-    metadata: list[RecipeMetadata] = []
-    corpus: list[str] = []
-    ingredient_occurrences: list[str] = []
-    seen_recipe_ids: set[str] = set()
-    skipped = 0
-
-    for index, recipe in enumerate(recipes, start=1):
-        if not isinstance(recipe, dict):
-            skipped += 1
-            continue
-
-        mapped_ingredients = recipe.get("mapped_ingredients") or []
-        if not isinstance(mapped_ingredients, list):
-            skipped += 1
-            continue
-
-        ingredients = unique_preserve_order(
-            [
-                normalize_ingredient(item.get("cleaned_entity"))
-                for item in mapped_ingredients
-                if isinstance(item, dict)
-            ]
-        )
-
-        if not ingredients:
-            skipped += 1
-            continue
-
-        url = str(recipe.get("URL") or "").strip()
-        recipe_id = recipe_id_from_url(url, index)
-        if recipe_id in seen_recipe_ids:
-            recipe_id = f"{recipe_id}-{index:05d}"
-        seen_recipe_ids.add(recipe_id)
-
-        tokens = [ingredient_to_token(ingredient) for ingredient in ingredients]
-        title = str(recipe.get("Title") or f"Recipe {index}").strip() or f"Recipe {index}"
-
-        metadata.append(
-            {
-                "id": recipe_id,
-                "title": title,
-                "url": url,
-                "ingredients": ingredients,
-                "ingredient_tokens": tokens,
-                "ingredient_count": len(ingredients),
-            }
-        )
-        corpus.append(" ".join(tokens))
-        ingredient_occurrences.extend(ingredients)
-
-    if not corpus:
-        raise ValueError("Tidak ada resep valid dengan mapped_ingredients.")
-
-    LOGGER.info("Resep valid: %s | Dilewati: %s", len(corpus), skipped)
-    return metadata, corpus, ingredient_occurrences
-
-
-def perform_eda(ingredients: list[str], output_path: Path, top_n: int = 20) -> None:
-    if not ingredients:
-        LOGGER.warning("EDA dilewati karena tidak ada ingredient valid.")
-        return
-
-    counts = Counter(ingredients)
-    top_items = counts.most_common(top_n)
-    top_df = pd.DataFrame(top_items, columns=["ingredient", "frequency"])
-
-    LOGGER.info("Total ingredient unik: %s", len(counts))
-    LOGGER.info("Top 5 ingredient:\n%s", top_df.head().to_string(index=False))
-
-    try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.figure(figsize=(12, 8))
-        sns.barplot(data=top_df, x="frequency", y="ingredient", color="#2f7f73")
-        plt.title(f"Top {top_n} Ingredient Paling Sering Muncul")
-        plt.xlabel("Frekuensi Resep")
-        plt.ylabel("Ingredient")
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=160)
-        LOGGER.info("Grafik EDA tersimpan di %s", output_path)
-    except OSError as exc:
-        LOGGER.warning("Grafik EDA tidak tersimpan: %s", exc)
-    finally:
-        plt.close()
-
-
-def build_vectorizer(min_df: int, max_df: float, max_features: int | None) -> TfidfVectorizer:
+def build_vectorizer(min_df: int) -> TfidfVectorizer:
     return TfidfVectorizer(
         lowercase=False,
         token_pattern=r"(?u)\b\w[\w-]*\b",
         min_df=min_df,
-        max_df=max_df,
-        max_features=max_features,
         norm="l2",
         smooth_idf=True,
         sublinear_tf=True,
         dtype=np.float32,
     )
 
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+    
+    LOGGER.info("Memuat dataset dari %s", DATA_PATH)
+    if not DATA_PATH.exists():
+        LOGGER.error("Dataset tidak ditemukan!")
+        return
 
-def train_and_export_tfidf(
-    corpus: list[str],
-    metadata: list[RecipeMetadata],
-    weights_dir: Path,
-    min_df: int,
-    max_df: float,
-    max_features: int | None,
-) -> None:
-    LOGGER.info("Training TF-IDF pada %s resep", len(corpus))
+    with DATA_PATH.open("r", encoding="utf-8") as file:
+        dataset = json.load(file)
 
-    vectorizer = build_vectorizer(
-        min_df=min_df,
-        max_df=max_df,
-        max_features=max_features,
-    )
+    # 1. Ekstrak Master Ingredients
+    LOGGER.info("Mengekstrak Master Ingredients...")
+    master_ingredients = {}
+    for item in dataset.get("data_ingredients_master", []):
+        norm_name = normalize_ingredient(item.get("clean_name"))
+        vector = item.get("flavor_vector")
+        master_ingredients[norm_name] = {
+            "ingredient_id": item.get("ingredient_id"),
+            "food_group": item.get("food_group", "Unknown"),
+            "flavor_vector": np.asarray(vector, dtype=np.float32).reshape(1, -1) if vector else np.zeros((1, 7), dtype=np.float32)
+        }
+    
+    # 2. Ekstrak Resep & Boosting is_core
+    LOGGER.info("Memproses Data Resep Mapped...")
+    metadata = []
+    corpus = []
+    
+    # Buat dictionary cepat untuk lookup ID ke Nama Clean
+    id_to_clean_name = {v.get("ingredient_id"): k for k, v in master_ingredients.items()}
+
+    for index, recipe in enumerate(dataset.get("data_recipes_mapped", []), start=1):
+        recipe_id = slugify(recipe.get("title", f"recipe-{index}"))
+        
+        doc_tokens = []
+        clean_ingredients_list = []
+        canonical_ingredients_list = []
+        core_ingredients_list = []
+        core_canonical_ingredients_list = []
+        
+        for ing in recipe.get("ingredients", []):
+            ing_id = ing.get("ingredient_id")
+            clean_name = id_to_clean_name.get(ing_id)
+            
+            if clean_name:
+                canonical_name = canonical_ingredient(clean_name)
+                tokens = [ingredient_to_token(term) for term in ingredient_variants(clean_name)]
+
+                # BOOSTING is_core: Jika true, masukkan token 3x lipat ke dokumen
+                if ing.get("is_core") is True:
+                    for token in tokens:
+                        doc_tokens.extend([token, token, token])
+                    core_ingredients_list.append(clean_name)
+                    if canonical_name not in core_canonical_ingredients_list:
+                        core_canonical_ingredients_list.append(canonical_name)
+                else:
+                    doc_tokens.extend(tokens)
+                
+                clean_ingredients_list.append(clean_name)
+                if canonical_name not in canonical_ingredients_list:
+                    canonical_ingredients_list.append(canonical_name)
+
+        if doc_tokens:
+            corpus.append(" ".join(doc_tokens))
+            metadata.append({
+                "id": recipe_id,
+                "title": recipe.get("title"),
+                "ingredients": clean_ingredients_list,
+                "canonical_ingredients": canonical_ingredients_list,
+                "core_ingredients": core_ingredients_list,
+                "core_canonical_ingredients": core_canonical_ingredients_list,
+            })
+
+    # 3. Training TF-IDF
+    LOGGER.info("Training TF-IDF pada %s resep...", len(corpus))
+    vectorizer = build_vectorizer(min_df=1)
     matrix = vectorizer.fit_transform(corpus).tocsr().astype(np.float32)
     matrix.sort_indices()
 
-    model_info = {
-        "n_recipes": matrix.shape[0],
-        "n_features": matrix.shape[1],
-        "min_df": min_df,
-        "max_df": max_df,
-        "max_features": max_features,
-        "artifact_version": 2,
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "n_unique_ingredients": len(vectorizer.vocabulary_),
-    }
-
-    weights_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(vectorizer, weights_dir / "tfidf_vectorizer.pkl", compress=3)
-    joblib.dump(matrix, weights_dir / "recipe_matrix.pkl", compress=3)
-    joblib.dump(metadata, weights_dir / "recipe_metadata.pkl", compress=3)
-    joblib.dump(model_info, weights_dir / "tfidf_model_info.pkl", compress=3)
-
-    LOGGER.info("Matriks TF-IDF: %s", matrix.shape)
-    LOGGER.info("Artifacts tersimpan di %s", weights_dir)
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train TF-IDF recipe matcher.")
-    parser.add_argument("--data-path", type=Path, default=DATA_PATH)
-    parser.add_argument("--weights-dir", type=Path, default=WEIGHTS_DIR)
-    parser.add_argument("--min-df", type=int, default=2)
-    parser.add_argument("--max-df", type=float, default=0.95)
-    parser.add_argument("--max-features", type=int, default=None)
-    parser.add_argument("--skip-eda", action="store_true")
-    return parser.parse_args()
-
-
-def validate_args(args: argparse.Namespace) -> None:
-    if args.min_df < 1:
-        raise ValueError("--min-df harus >= 1.")
-
-    if not 0 < args.max_df <= 1:
-        raise ValueError("--max-df harus di antara 0 dan 1.")
-
-    if args.max_features is not None and args.max_features < 1:
-        raise ValueError("--max-features harus >= 1 jika diisi.")
-
-
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
-    args = parse_args()
-    validate_args(args)
-
-    metadata, corpus, ingredients = load_and_extract_data(args.data_path)
-
-    if not args.skip_eda:
-        perform_eda(ingredients, EDA_PLOT_PATH)
-
-    train_and_export_tfidf(
-        corpus=corpus,
-        metadata=metadata,
-        weights_dir=args.weights_dir,
-        min_df=args.min_df,
-        max_df=args.max_df,
-        max_features=args.max_features,
-    )
-
+    # 4. Export Artifacts
+    WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(vectorizer, WEIGHTS_DIR / "tfidf_vectorizer.pkl", compress=3)
+    joblib.dump(matrix, WEIGHTS_DIR / "recipe_matrix.pkl", compress=3)
+    joblib.dump(metadata, WEIGHTS_DIR / "recipe_metadata.pkl", compress=3)
+    # Artifact Baru: Master DB untuk Substitusi Engine Layer 2 & 3
+    joblib.dump(master_ingredients, WEIGHTS_DIR / "ingredient_master.pkl", compress=3) 
+    
+    LOGGER.info("SUKSES! Artifacts tersimpan di %s", WEIGHTS_DIR)
 
 if __name__ == "__main__":
     main()
