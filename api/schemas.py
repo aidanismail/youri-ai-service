@@ -31,7 +31,9 @@ class MatchRequest(APIModel):
 
 class MatchResult(APIModel):
     recipe_id: str
+    title: str = Field(default="Resep Tanpa Nama")
     match_percentage: int = Field(..., ge=0, le=100)
+    steps: list[str] = Field(default_factory=list)
 
 
 class MatchResponse(APIModel):
