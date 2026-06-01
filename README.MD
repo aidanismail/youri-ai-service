@@ -18,8 +18,12 @@ FastAPI microservice untuk fitur AI pada **Youri - Smart Cooking Assistant**. Se
 | Recipe matching | Done | TF-IDF + ingredient normalization + scoring guard |
 | AI substitution baseline | Done | Functional group + cosine similarity |
 | API key protection | Done | Header `x-internal-api-key` |
-| DL model | In progress | Dilanjutkan di `train_dl.py`, `custom_layers.py`, `substitution_dl.py` |
-| TensorBoard/evaluation/export DL | Pending | Bagian lanjutan untuk checklist AI |
+| DL model | Done | Dilanjutkan di `train_dl.py`, `custom_layers.py`, `substitution_dl.py` |
+| TensorBoard/evaluation/export DL | Done | Bagian lanjutan untuk checklist AI |
+| AI Substitution Engine | Done | Integrasi Hybrid: Functional Group Matrix + Cosine Similarity |
+| Deep Learning Ranker | Done | Keras Functional API dengan Custom Layer FlavorInteractionLayer |
+| Context-Aware Inference | Done | Model sukses mengadu bumbu surplus vs Rata-Rata Vektor Rasa Kuali |
+
 
 ## Tech Stack
 
@@ -38,23 +42,31 @@ FastAPI microservice untuk fitur AI pada **Youri - Smart Cooking Assistant**. Se
 youri-ai-service/
 |-- main.py
 |-- requirements.txt
+|-- README.md
 |-- api/
 |   |-- dependencies.py
 |   |-- schemas.py
 |   `-- routers/
 |       `-- cooking.py
 |-- data/
-|   `-- dataset_opsi_1_final_with_images.json
+|   `-- dataset_opsi_1_final_with_images.json  
 |-- ml_engine/
-|   |-- information_retrieval.py
-|   |-- ingredient_normalization.py
-|   |-- custom_layers.py
-|   |-- substitution_dl.py
+|   |-- information_retrieval.py               
+|   |-- ingredient_normalization.py            
+|   |-- custom_layers.py                       
+|   |-- substitution_dl.py                     
 |   `-- weights/
+|       |-- tfidf_vectorizer.pkl
+|       |-- recipe_matrix.pkl
+|       |-- recipe_metadata.pkl
+|       |-- ingredient_master.pkl              
+|       |-- substitution_ranker.keras          
+|       `-- substitution_ranker_metrics.json   
 |-- scripts/
-|   |-- train_tfidf.py
-|   `-- train_dl.py
+|   |-- train_tfidf.py                         
+|   `-- train_dl.py                            
 `-- logs/
+    `-- tensorboard/                           
 ```
 
 ## Setup
@@ -93,6 +105,21 @@ ml_engine/weights/tfidf_vectorizer.pkl
 ml_engine/weights/recipe_matrix.pkl
 ml_engine/weights/recipe_metadata.pkl
 ml_engine/weights/ingredient_master.pkl
+```
+
+## Generate Artifact Deep Learning
+
+Jalankan perintah ini untuk melatih model jaringan saraf tiruan (Keras) dalam mengenali interaksi kombinasi rasa bumbu di dalam kuali:
+
+```powershell
+python scripts/train_dl.py
+```
+
+Output artifact:
+
+```txt
+ml_engine/weights/substitution_ranker.keras
+ml_engine/weights/substitution_ranker_metrics.json
 ```
 
 ## Run Service
@@ -188,22 +215,26 @@ Contoh payload:
 ### Recipe Matching
 
 ```txt
-Payload ingredients
--> filter is_valid
--> normalize ingredient
--> TF-IDF candidate retrieval
--> scoring guard bahan utama dan bahan meaningful
--> return top recipe matches
+User Payload Ingredients (Kulkas)
+  │
+  ├──► Filter komponen 'is_valid' & eliminasi bumbu umum (Garampenyedap, Air, Minyak) via COMMON_INGREDIENTS
+  ├──► Normalisasi string teks menjadi token kanonikal murni
+  ├──► Transformasi matriks via TF-IDF Vectorizer
+  ├──► Penyaringan Guard: Validasi ketersediaan bahan utama resep (Anchor Ingredients)
+  ├──► Kalkulasi rasio cakupan resep (Recipe Coverage) & presisi bahan pengguna (User Precision)
+  └──► Penggabungan metadata langkah memasak ('steps') via dinamika algoritma Local Slugify
 ```
 
 ### AI Substitution
 
 ```txt
-Missing ingredient + surplus ingredients
--> normalize ingredient
--> functional group compatibility
--> cosine similarity flavor profile
--> substitution threshold
--> return realistic substitution mapping
+Bahan Hilang (Missing) + Bahan Sisa (Surplus)
+  │
+  ├──► Validasi gerbang Layer 1: Kompatibilitas fungsional rumpun makanan (Substitution Compatibility Matrix)
+  ├──► Validasi gerbang Layer 2: Perhitungan Cosine Similarity antara matriks profil rasa 7-D bahan masakan
+  ├──► Validasi gerbang Layer 3 (Deep Learning): Evaluasi bumbu surplus melawan Rata-Rata Konteks Rasa Resep 
+  │    menggunakan model jaringan saraf tiruan (Average Pooling Context Vector)
+  ├──► Kombinasi Bobot Final Skor: (50% DL Score + 30% Flavor Cosine + 20% Functional Filter)
+  └──► Output: Pemetaan bahan substitusi terbaik dilengkapi dialog respon emosional karakter asisten masis
 ```
 

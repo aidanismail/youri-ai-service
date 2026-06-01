@@ -1,0 +1,9 @@
+{
+    "model_architecture": "Functional API with Custom FlavorInteractionLayer",
+    "final_evaluation": {
+        "accuracy": 0.887499988079071,
+        "mae": 0.018,
+        "loss": 0.5397
+    },
+    "status": "PASSED"
+}

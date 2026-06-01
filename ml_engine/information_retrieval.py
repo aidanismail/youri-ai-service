@@ -285,6 +285,58 @@ class LexicalMatcherModel:
                 for ingredient in self.known_ingredients
                 if canonical_ingredient(ingredient)
             }
+            json_path = BASE_DIR / "data" / "dataset_opsi_1_final_with_images.json"
+            self.raw_recipes_lookup = {}
+            
+            print(f"\n[DEBUG] Mengecek file JSON di: {json_path.absolute()}")
+            print(f"[DEBUG] Apakah file ada? {json_path.exists()}")
+            
+            if json_path.exists():
+                import json
+                import re
+                with open(json_path, "r") as f:
+                    raw_data = json.load(f)
+                
+                recipes_list = []
+                if isinstance(raw_data, dict):
+                    recipes_list = raw_data.get("data_recipes_mapped", [])
+                    print(f"[DEBUG] Berhasil masuk ke key 'data_recipes_mapped'.")
+                elif isinstance(raw_data, list):
+                    recipes_list = raw_data
+                
+                print(f"[DEBUG] Total elemen resep setelah normalisasi list: {len(recipes_list)}")
+                
+                # Fungsi helper slugify mandiri biar ga perlu install library tambahan
+                def local_slugify(text: str) -> str:
+                    if not text:
+                        return ""
+                    text = text.lower().strip()
+                    # Hapus karakter non-alphanumeric (kecuali spasi dan minus)
+                    text = re.sub(r'[^a-z0-9\s-]', '', text)
+                    # Ganti spasi atau spasi berulang menjadi satu minus
+                    text = re.sub(r'[\s-]+', '-', text)
+                    return text
+                
+                for idx, r in enumerate(recipes_list, start=1):
+                    if isinstance(r, dict):
+                        # Tiru persis logika training Aidan
+                        title = r.get("title")
+                        recipe_id = local_slugify(title) if title else f"recipe-{idx}"
+                        
+                        if recipe_id:
+                            self.raw_recipes_lookup[recipe_id] = r
+                            
+                print(f"[DEBUG] Total resep sukses masuk map lookup: {len(self.raw_recipes_lookup)}")
+                LOGGER.info("Fallback JSON sukses dimuat sebagai pelengkap metadata!")
+            else:
+                LOGGER.warning("File %s tidak ditemukan. Field 'steps' mungkin akan kosong.", json_path.name)
+
+            self.known_ingredients = set(self.ingredient_master.keys())
+            self.known_canonical_ingredients = {
+                canonical_ingredient(ingredient)
+                for ingredient in self.known_ingredients
+                if canonical_ingredient(ingredient)
+            }
             LOGGER.info("TF-IDF matcher siap: %s resep", self.recipe_matrix.shape[0])
         except Exception as exc:
             self.load_error = f"Gagal memuat artifacts: {exc}"
@@ -440,12 +492,22 @@ class LexicalMatcherModel:
             if match_percentage < required_percentage:
                 continue
             
+            r_id = metadata["id"]
+            raw_recipe = self.raw_recipes_lookup.get(r_id, {})
+            
+            recipe_steps = (
+                metadata.get("steps") 
+                or raw_recipe.get("steps") 
+                or metadata.get("instructions") 
+                or []
+            )
         
 
             results.append({
                 "recipe_id": metadata["id"],
                 "title": metadata["title"],
                 "match_percentage": match_percentage,
+                "steps": recipe_steps,
                 "_matched_count": len(matched_ingredients),
                 "_tfidf_score": float(scores[index]),
             })

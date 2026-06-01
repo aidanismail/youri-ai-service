@@ -9,6 +9,9 @@ from api.dependencies import (
     get_substitution_engine,
     verify_internal_api_key,
 )
+
+from ml_engine.substitution_dl import SubstitutionRankerModel
+
 from api.schemas import (
     CharacterDialog,
     ItemData,
@@ -25,7 +28,7 @@ from ml_engine.information_retrieval import LexicalMatcherModel, SmartSubstituti
 
 router = APIRouter(tags=["Internal AI System"])
 AUTH_DEPENDENCY = [Depends(verify_internal_api_key)]
-
+dl_ranker = None
 
 def _valid_items(items: list[ItemData]) -> list[ItemData]:
     return [item for item in items if item.is_valid and item.name]
@@ -62,7 +65,9 @@ def match_recipes(
     results = [
         MatchResult(
             recipe_id=prediction["recipe_id"],
+            title=prediction.get("title", "Resep Tanpa Nama"),
             match_percentage=prediction["match_percentage"],
+            steps=prediction.get("steps", []),
         )
         for prediction in predictions
     ]
@@ -121,6 +126,21 @@ def ai_substitution(
         # 1. TANGKAP SKORNYA DARI KANDIDAT
         flavor_score = best_candidate.get("flavor_similarity_score", 0.0)
         
+        functional_score = 1.0 if best_candidate.get("same_food_group") else 0.0
+            
+        global dl_ranker
+        if dl_ranker is None:
+            dl_ranker = SubstitutionRankerModel(engine_instance=substitution_engine)
+                
+        dl_score = dl_ranker.predict_rank_score_context(
+            candidate_item=replacement_name, 
+            all_recipe_ingredients=surplus_names
+        )
+            
+        # Gabungkan Bobot Penilaian (50% DL + 30% Flavor Cosine + 20% Functional Filter)
+        combined_score = (dl_score * 0.50) + (flavor_score * 0.30) + (functional_score * 0.20)
+        flavor_score = round(combined_score, 4)  # Menimpa nilai agar masuk ke respons JSON
+            
         replacement_item = surplus_by_name.get(replacement_name.casefold())
         
         mappings.append(
