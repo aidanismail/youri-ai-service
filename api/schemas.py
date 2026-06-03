@@ -31,9 +31,7 @@ class MatchRequest(APIModel):
 
 class MatchResult(APIModel):
     recipe_id: str
-    title: str = Field(default="Resep Tanpa Nama")
     match_percentage: int = Field(..., ge=0, le=100)
-    steps: list[str] = Field(default_factory=list)
 
 
 class MatchResponse(APIModel):
@@ -42,6 +40,7 @@ class MatchResponse(APIModel):
 
 
 class SubstitutionRequest(APIModel):
+    task_id: str = Field(..., min_length=1) # <--- TAMBAHKAN INI (Wajib dikirim dari Express)
     recipe_id: str = Field(..., min_length=1)
     missing_ingredients: list[ItemData] = Field(..., min_length=1)
     surplus_ingredients: list[ItemData] = Field(default_factory=list)
@@ -71,3 +70,11 @@ class SubstitutionData(APIModel):
 class SubstitutionResponse(APIModel):
     message: str
     data: SubstitutionData
+
+class TaskStatusData(APIModel):
+    status: Literal["processing", "completed", "failed"]
+    result: SubstitutionData | None = None
+    
+class TaskStatusResponse(APIModel):
+    message: str
+    data: TaskStatusData
